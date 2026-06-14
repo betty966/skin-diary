@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="https://via.placeholder.com/150/ff4081/ffffff?text=SkinMe">
+    <title>個人膚況分析日記</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/blazeface"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+
+    <style>
+        :root {
+            --primary-color: #ff4081;
+            --bg-color: #fff1f5;
+            --text-color: #333;
+            --card-bg: #fff;
+        }
+        body {
+            font-family: 'PingFang TC', system-ui, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            box-sizing: border-box;
+        }
+        h1 { color: #c2185b; font-size: 20px; margin-bottom: 5px;}
+        .subtitle { font-size: 12px; color: #888; margin-bottom: 20px;}
+
+        /* 相機容器：保持正方形，模擬真實 App */
+        .camera-container {
+            position: relative;
+            width: 300px;
+            height: 300px;
+            overflow: hidden;
+            border-radius: 50%; /* 做成圓形，讓你自己對準 */
+            border: 5px solid var(--primary-color);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+            background: #000;
+        }
+
+        #video, #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* 鏡像畫面，看起來更自然 */
+        }
+
+        #overlay {
+            z-index: 10;
+            pointer-events: none; /* 讓點擊穿過 canvas */
+        }
+
+        .controls { margin-top: 25px; text-align: center; width: 100%;}
+
+        .btn {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 12px 28px;
+            font-size: 16px;
+            border-radius: 25px;
+            cursor: pointer;
+            box-shadow: 0 4px 10px rgba(255, 64, 129, 0.3);
+            font-weight: bold;
+            transition: 0.2s;
+            margin: 0 5px;
+        }
+        .btn:active { transform: scale(0.95); }
+        .btn:disabled { background-color: #ccc; box-shadow: none; cursor: not-allowed;}
+
+        /* 當日結果區 */
+        .result-card {
+            background: var(--card-bg);
+            border-radius: 15px;
+            width: 300px;
+            padding: 15px;
+            margin-top: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+            display: none;
+            text-align: left;
+        }
+        .result-card h3 { margin-top: 0; color: #c2185b; font-size: 16px;}
+        .stat-row { display: flex; justify-content: space-between; margin: 8px 0; font-size: 14px;}
+        .stat-label { color: #666; }
+        .stat-value { font-weight: bold; }
+        .redness-meter {
+            height: 8px;
+            background: #eee;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+        .redness-fill {
+            height: 100%;
+            background: linear-gradient(to right, #4caf50, #ffeb3b, #f44336);
+            width: 0%;
+            transition: width 0.5s;
+        }
+
+        /* 歷史日記區 */
+        .diary-section {
+            width: 300px;
+            margin-top: 30px;
+            text-align: left;
+            padding-bottom: 30px;
+        }
+        .diary-section h2 { font-size: 18px; color: var(--text-color); }
+        .diary-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .diary-item {
+            background: var(--card-bg);
+            padding: 12px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.03);
+            font-size: 14px;
+        }
+        .diary-date { color: #888; font-family: monospace; }
+        .diary-index { font-weight: bold; color: #c2185b; }
+
+        #status { font-size: 12px; color: var(--primary-color); margin-top: 10px; font-weight: bold;}
+    </style>
+</head>
+<body>
+
+    <h1>SkinMe 膚況日記</h1>
+    <p class="subtitle">AI 智能追蹤泛紅與膚色 (僅限自己使用)</p>
+
+    <div class="camera-container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+    </div>
+    <p id="status">正在載入 AI 模型...</p>
+
+    <div class="controls">
+        <button class="btn" id="captureBtn" disabled>拍下今日膚況</button>
+        <button class="btn" id="clearBtn" style="background-color: #666; font-size: 12px; padding: 8px 15px;">清空歷史</button>
+    </div>
+
+    <div class="result-card" id="resultCard">
+        <h3>當日分析報告</h3>
+        <div class="stat-row">
+            <span class="stat-label">時間:</span>
+            <span class="stat-value" id="resTime"></span>
+        </div>
+        <div class="stat-row">
+            <span class="stat-label">臉頰紅斑指數:</span>
+            <span class="stat-value" id="resRedIndex">0</span>
+        </div>
+        <div class="redness-meter">
+            <div class="redness-fill" id="resRedFill"></div>
+        </div>
+        <div class="stat-row" style="margin-top: 15px; font-size: 12px; color: #999;">
+            <span class="stat-label">參考膚色(RGB):</span>
+            <span class="stat-value" id="resRGB">0, 0, 0</span>
+        </div>
+    </div>
+
+    <div class="diary-section">
+        <h2>歷史追蹤紀錄 (泛紅指數)</h2>
+        <ul class="diary-list" id="diaryList">
+            </ul>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const statusText = document.getElementById('status');
+        const captureBtn = document.getElementById('captureBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const resultCard = document.getElementById('resultCard');
+        const resTime = document.getElementById('resTime');
+        const resRedIndex = document.getElementById('resRedIndex');
+        const resRedFill = document.getElementById('resRedFill');
+        const resRGB = document.getElementById('resRGB');
+        const diaryList = document.getElementById('diaryList');
+
+        let model = null;
+        let isFaceDetected = false;
+        let currentFacePrediction = null;
+
+        // --- 初始化：開啟相機與載入 AI ---
+        async function setupApp() {
+            try {
+                // 1. 開啟相機 (前鏡頭)
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'user', width: 300, height: 300 } 
+                });
+                video.srcObject = stream;
+
+                // 2. 載入 MediaPipe BlazeFace 模型
+                statusText.innerText = "正在初始化 AI 人臉追蹤...";
+                model = await blazeface.load();
+                
+                statusText.innerText = "✔ AI 準備就緒，請將臉部對準圓圈";
+                captureBtn.disabled = false;
+
+                // 3. 開始循環偵測
+                detectFace();
+                // 4. 載入歷史紀錄
+                renderDiary();
+            } catch (err) {
+                statusText.innerText = "🚫 無法啟動相機或 AI，請檢查權限";
+                alert('初始化失敗：' + err.message);
+            }
+        }
+
+        // --- 核心：基礎 AI 人臉追蹤與繪圖 ---
+        async function detectFace() {
+            if (!model) return;
+
+            // 在 AI 模型中分析影像
+            const predictions = await model.estimateFaces(video, false);
+            
+            const ctx = overlay.getContext('2d');
+            overlay.width = video.videoWidth;
+            overlay.height = video.videoHeight;
+            ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+            if (predictions.length > 0) {
+                isFaceDetected = true;
+                currentFacePrediction = predictions[0];
+                const start = currentFacePrediction.topLeft;
+                const end = currentFacePrediction.bottomRight;
+                const size = [end[0] - start[0], end[1] - start[1]];
+
+                // 繪製基礎追蹤框 (這就是基礎 AI 人臉追踪)
+                ctx.strokeStyle = "#ff4081";
+                ctx.lineWidth = 4;
+                ctx.strokeRect(start[0], start[1], size[0], size[1]);
+                
+                statusText.innerText = "✔ 已鎖定臉部";
+                statusText.style.color = "green";
+            } else {
+                isFaceDetected = false;
+                statusText.innerText = "❓ 未偵測到臉部，請保持臉部完整在畫面內";
+                statusText.style.color = "#ff4081";
+            }
+
+            // 無限循環，保持偵測
+            requestAnimationFrame(detectFace);
+        }
+
+        // --- 擷取與分析：膚色與紅斑分析 ---
+        captureBtn.addEventListener('click', () => {
+            if (!isFaceDetected || !currentFacePrediction) {
+                alert('請先讓 AI 鎖定您的臉部');
+                return;
+            }
+
+            const ctx = overlay.getContext('2d');
+            const start = currentFacePrediction.topLeft;
+            const end = currentFacePrediction.bottomRight;
+            const faceWidth = end[0] - start[0];
+            const faceHeight = end[1] - start[1];
+
+            // 1. 定義「臉頰分析區域」(擷取人臉下半部、偏中央的區域，避免眼睛和頭髮)
+            const analysisW = faceWidth * 0.4;
+            const analysisH = faceHeight * 0.2;
+            const analysisX = start[0] + (faceWidth * 0.3);
+            const analysisY = start[1] + (faceHeight * 0.5); // 從臉部高度一半開始
+
+            // (選做) 在畫面上畫出分析區域讓你看
+            ctx.strokeStyle = "white";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(analysisX, analysisY, analysisW, analysisH);
+
+            // 2. 擷取該區域的像素資料
+            const imageData = ctx.getImageData(analysisX, analysisY, analysisW, analysisH);
+            const pixels = imageData.data; // 這是 RGBARGBARGBA 的陣列
+
+            let totalR = 0;
+            let totalG = 0;
+            let totalB = 0;
+            let pixelCount = 0;
+
+            for (let i = 0; i < pixels.length; i += 4) {
+                totalR += pixels[i];     // Red
+                totalG += pixels[i + 1]; // Green
+                totalB += pixels[i + 2]; // Blue
+                pixelCount++;
+            }
+
+            // 3. 計算平均 RGB
+            const avgR = Math.round(totalR / pixelCount);
+            const avgG = Math.round(totalG / pixelCount);
+            const avgB = Math.round(totalB / pixelCount);
+
+            // 4. 計算模擬的「紅斑指數」 (這裡使用一個簡單公式：R在G和B平均中的佔比)
+            const gbAvg = (avgG + avgB) / 2;
+            // 指數演算法: 紅色比綠藍平均多了多少百分比。如果紅色較少則為 0。
+            let rednessIndex = 0;
+            if (gbAvg > 0) {
+                rednessIndex = Math.round(((avgR - gbAvg) / gbAvg) * 100);
+            }
+            rednessIndex = Math.max(0, Math.min(100, rednessIndex)); // 限制在 0-100
+
+            // 5. 顯示結果
+            showResult(rednessIndex, avgR, avgG, avgB);
+            // 6. 存入日記
+            saveToDiary(rednessIndex);
+        });
+
+        // --- 顯示分析結果 ---
+        function showResult(rednessIndex, r, g, b) {
+            const now = new Date();
+            resTime.innerText = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
+            resRedIndex.innerText = rednessIndex + '%';
+            resRedFill.style.width = rednessIndex + '%';
+            resRGB.innerText = `${r}, ${g}, ${b}`;
+            resultCard.style.display = 'block';
+        }
+
+        // --- 日記功能：LocalStorage 存儲 ---
+        function saveToDiary(rednessIndex) {
+            const now = new Date();
+            const dateStr = now.getFullYear() + '/' + 
+                           String(now.getMonth() + 1).padStart(2, '0') + '/' + 
+                           String(now.getDate()).padStart(2, '0');
+
+            const newEntry = {
+                date: dateStr,
+                time: resTime.innerText,
+                redness: rednessIndex
+            };
+
+            // 讀取舊資料
+            let history = JSON.parse(localStorage.getItem('skin_history')) || [];
+            
+            // 為了不讓日記無限膨脹，限制儲存最近 30 天
+            history.unshift(newEntry); // 新的排前面
+            if (history.length > 30) history.pop();
+
+            // 存回本地
+            localStorage.setItem('skin_history', JSON.stringify(history));
+            
+            // 重新渲染清單
+            renderDiary();
+        }
+
+        // --- 渲染歷史清單 ---
+        function renderDiary() {
+            const history = JSON.parse(localStorage.getItem('skin_history')) || [];
+            diaryList.innerHTML = '';
+
+            if (history.length === 0) {
+                diaryList.innerHTML = '<li style="color:#888; font-size:12px; text-align:center;">尚無紀錄，開始您的第一次檢測吧！</li>';
+                return;
+            }
+
+            history.forEach(entry => {
+                const li = document.createElement('li');
+                li.className = 'diary-item';
+                li.innerHTML = `
+                    <div>
+                        <span class="diary-date">${entry.date} ${entry.time}</span>
+                    </div>
+                    <span class="diary-index">泛紅 ${entry.redness}%</span>
+                `;
+                diaryList.appendChild(li);
+            });
+        }
+
+        // --- 清空清單 ---
+        clearBtn.addEventListener('click', () => {
+            if (confirm('確定要清空所有歷史膚況紀錄嗎？這無法還原。')) {
+                localStorage.removeItem('skin_history');
+                resultCard.style.display = 'none';
+                renderDiary();
+            }
+        });
+
+        // 啟動 App
+        window.addEventListener('load', setupApp);
+
+    </script>
+</body>
+</html>
